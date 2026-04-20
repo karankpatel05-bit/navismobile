@@ -1,0 +1,11 @@
+# Environments
+.env
+env
+venv/
+__pycache__/
+
+# Keys and certificates
+*.pem
+
+# AI Models (Optional, but usually ignored due to size)
+*.pt

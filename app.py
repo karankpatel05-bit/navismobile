@@ -90,13 +90,25 @@ def find_matching_qa(question):
 # ─────────────────────────────────────────────────────────
 #  ROBOT VISION & MOVEMENT CONSTANTS
 # ─────────────────────────────────────────────────────────
-FORWARD_SPEED  = 100
-BACKWARD_SPEED = 90
-TURN_SPEED     = 85
+FORWARD_SPEED  = 80
+BACKWARD_SPEED = 80
+MAX_TURN_SPEED = 85
+MIN_TURN_SPEED = 40
 
-TURN_DEADZONE  = 100
-DIST_DEADZONE  = 0.08
-TARGET_HEIGHT_RATIO = 0.60
+# PID gains for yaw (tune Kp first)
+PID_KP = 0.12
+PID_KD = 0.04
+
+TURN_DEADZONE    = 40       # px
+DIST_DEADZONE_CM = 15       # cm
+
+# Real distance model — pinhole camera using shoulder width
+SHOULDER_WIDTH_CM = 42.0
+FOCAL_LEN_PX      = 600.0
+TARGET_DIST_CM    = 80.0
+
+# EMA smoothing coefficient (0 < α ≤ 1)
+EMA_ALPHA = 0.35
 
 VIDEO_URL = f"http://{PHONE_IP}:8080/video"
 
@@ -109,8 +121,12 @@ else:
     det_model = None
     pose_model = None
 
-SHOULDER_L, SHOULDER_R = 5, 6
-WRIST_L,    WRIST_R    = 9, 10
+# COCO 17-keypoint indices
+NOSE       = 0
+SHOULDER_L = 5
+SHOULDER_R = 6
+WRIST_L    = 9
+WRIST_R    = 10
 
 latest_frame  = None
 output_frame  = None
@@ -162,35 +178,69 @@ def send_speeds(left: int, right: int):
 
 def move_forward():  send_speeds( FORWARD_SPEED,   FORWARD_SPEED)
 def move_backward(): send_speeds(-BACKWARD_SPEED, -BACKWARD_SPEED)
-def turn_left():     send_speeds(-TURN_SPEED,       TURN_SPEED)
-def turn_right():    send_speeds( TURN_SPEED,      -TURN_SPEED)
 def stop():
     send_speeds(0, 0)
     threading.Thread(target=_send_stop_async, daemon=True).start()
 
-def is_hand_raised(pose_results) -> bool:
-    if not pose_results or len(pose_results[0].keypoints) == 0:
-        return False
-    for kpts in pose_results[0].keypoints.data:
-        lw_y, lw_c = float(kpts[WRIST_L][1]),   float(kpts[WRIST_L][2])
-        ls_y, ls_c = float(kpts[SHOULDER_L][1]), float(kpts[SHOULDER_L][2])
-        rw_y, rw_c = float(kpts[WRIST_R][1]),   float(kpts[WRIST_R][2])
-        rs_y, rs_c = float(kpts[SHOULDER_R][1]), float(kpts[SHOULDER_R][2])
+def turn_pid(error_px: float, prev_error: float, dt: float):
+    """PID turn: returns (left_speed, right_speed)."""
+    p = PID_KP * error_px
+    d = PID_KD * (error_px - prev_error) / max(dt, 1e-3)
+    raw = p + d
+    speed = int(min(abs(raw) * MAX_TURN_SPEED, MAX_TURN_SPEED))
+    speed = max(speed, MIN_TURN_SPEED)
+    return (speed, -speed) if raw > 0 else (-speed, speed)
 
-        left_raised  = lw_c > 0.4 and ls_c > 0.4 and lw_y < ls_y
-        right_raised = rw_c > 0.4 and rs_c > 0.4 and rw_y < rs_y
-        if left_raised or right_raised:
+def is_hand_raised(kpts_data) -> bool:
+    for kpts in kpts_data:
+        lw_y, lw_c = float(kpts[WRIST_L][1]), float(kpts[WRIST_L][2])
+        ls_y, ls_c = float(kpts[SHOULDER_L][1]), float(kpts[SHOULDER_L][2])
+        rw_y, rw_c = float(kpts[WRIST_R][1]), float(kpts[WRIST_R][2])
+        rs_y, rs_c = float(kpts[SHOULDER_R][1]), float(kpts[SHOULDER_R][2])
+        if (lw_c > 0.4 and ls_c > 0.4 and lw_y < ls_y) or \
+           (rw_c > 0.4 and rs_c > 0.4 and rw_y < rs_y):
             return True
     return False
+
+def shoulder_distance_cm(kpts):
+    ls_x, ls_c = float(kpts[SHOULDER_L][0]), float(kpts[SHOULDER_L][2])
+    rs_x, rs_c = float(kpts[SHOULDER_R][0]), float(kpts[SHOULDER_R][2])
+    if ls_c < 0.4 or rs_c < 0.4:
+        return None
+    span = abs(rs_x - ls_x)
+    return (SHOULDER_WIDTH_CM * FOCAL_LEN_PX) / span if span > 10 else None
+
+def shoulder_midpoint_px(kpts):
+    ls_x, ls_c = float(kpts[SHOULDER_L][0]), float(kpts[SHOULDER_L][2])
+    rs_x, rs_c = float(kpts[SHOULDER_R][0]), float(kpts[SHOULDER_R][2])
+    if ls_c < 0.3 or rs_c < 0.3:
+        return None
+    return (ls_x + rs_x) / 2.0
+
+def select_best_box(boxes):
+    best_idx, best_area = 0, -1
+    for i, box in enumerate(boxes):
+        x1, y1, x2, y2 = map(float, box.xyxy[0])
+        area = (x2 - x1) * (y2 - y1)
+        if area > best_area:
+            best_area = area
+            best_idx = i
+    return best_idx
 
 def vision_loop():
     global output_frame, active_mode
     if not det_model:
         return
 
+    # EMA state
+    ema_cx = ema_dist = None
+    # PID state
+    prev_error = 0.0
+    prev_time  = time.monotonic()
+
     last_left, last_right = 0, 0
     frames_since_cmd = 0
-    pose_check_every = 5
+    pose_every   = 3
     frame_counter = 0
 
     print("Vision loop started. Waiting for first frame...")
@@ -202,92 +252,148 @@ def vision_loop():
             frame = latest_frame.copy()
 
         if active_mode != "follower":
-            # Just quickly pause without doing tracking computation
             time.sleep(0.1)
             continue
 
         frame_counter += 1
+        now = time.monotonic()
+        dt  = now - prev_time
+        prev_time = now
+
         h, w, _ = frame.shape
-        frame_cx = w // 2
+        frame_cx  = w // 2
         annotated = frame.copy()
         action_label = "SEARCHING..."
         label_color  = (200, 200, 200)
         next_left = next_right = 0
 
-        hand_raised = False
-        if frame_counter % pose_check_every == 0:
+        # Pose check every N frames
+        pose_results = None
+        if frame_counter % pose_every == 0:
             pose_results = pose_model(frame, verbose=False)
-            hand_raised  = is_hand_raised(pose_results)
 
-        if hand_raised:
-            stop()
-            action_label = "STOP — Hand Raised"
-            label_color  = (0, 0, 255)
-            cv2.rectangle(annotated, (0, 0), (w, 60), (0, 0, 180), -1)
-            cv2.putText(annotated, "✋  " + action_label, (20, 42), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 2)
-            with stream_lock:
-                output_frame = annotated.copy()
-            continue
+        # Hand-raise check
+        if pose_results is not None and len(pose_results[0].keypoints) > 0:
+            if is_hand_raised(pose_results[0].keypoints.data):
+                stop()
+                action_label = "STOP — Hand Raised"
+                label_color  = (0, 0, 255)
+                cv2.rectangle(annotated, (0, 0), (w, 60), (0, 0, 180), -1)
+                cv2.putText(annotated, "✋  " + action_label,
+                            (20, 42), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 2)
+                with stream_lock:
+                    output_frame = annotated.copy()
+                continue
 
         det_results = det_model(frame, classes=[0], verbose=False)
 
         if len(det_results[0].boxes) == 0:
             stop()
+            ema_cx = ema_dist = None
+            prev_error = 0.0
             action_label = "NO HUMAN — STOPPED"
             label_color  = (0, 120, 255)
-            cv2.putText(annotated, action_label, (30, 45), cv2.FONT_HERSHEY_SIMPLEX, 1.1, label_color, 2)
+            cv2.putText(annotated, action_label,
+                        (30, 45), cv2.FONT_HERSHEY_SIMPLEX, 1.1, label_color, 2)
             with stream_lock:
                 output_frame = annotated.copy()
             continue
 
-        box = det_results[0].boxes[0].xyxy[0]
+        # Pick closest / largest person
+        best_idx = select_best_box(det_results[0].boxes)
+        box = det_results[0].boxes[best_idx].xyxy[0]
         x1, y1, x2, y2 = map(int, box)
-        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 80), 2)
 
-        box_h        = y2 - y1
-        person_cx    = (x1 + x2) // 2
-        horiz_offset = person_cx - frame_cx
-        cur_ratio    = box_h / float(h)
-        dist_error   = TARGET_HEIGHT_RATIO - cur_ratio
+        for i, b in enumerate(det_results[0].boxes):
+            bx1, by1, bx2, by2 = map(int, b.xyxy[0])
+            color = (0, 255, 80) if i == best_idx else (80, 80, 80)
+            cv2.rectangle(annotated, (bx1, by1), (bx2, by2), color,
+                          2 if i == best_idx else 1)
 
-        approx_cm = max(1, int((TARGET_HEIGHT_RATIO / cur_ratio) * 10))
+        raw_cx  = (x1 + x2) // 2
+        dist_cm = None
 
-        cv2.line(annotated, (frame_cx, h // 2), (person_cx, h // 2), (0, 255, 80), 2)
-        cv2.circle(annotated, (person_cx, (y1 + y2) // 2), 6, (0, 255, 80), -1)
+        if pose_results is not None and len(pose_results[0].keypoints) > best_idx:
+            kpts = pose_results[0].keypoints.data[best_idx]
+            mid  = shoulder_midpoint_px(kpts)
+            if mid is not None:
+                raw_cx = int(mid)
+                mid_y  = int(float(kpts[SHOULDER_L][1]) +
+                             float(kpts[SHOULDER_R][1])) // 2
+                cv2.circle(annotated, (raw_cx, mid_y), 7, (255, 200, 0), -1)
+            dist_cm = shoulder_distance_cm(kpts)
 
+        # EMA smoothing
+        ema_cx = (EMA_ALPHA * raw_cx + (1 - EMA_ALPHA) * ema_cx
+                  if ema_cx is not None else float(raw_cx))
+
+        if dist_cm is None:
+            # Fallback: use bounding-box WIDTH as a proxy for shoulder span
+            # Same pinhole model as keypoint path: D = (W_cm * F_px) / span_px
+            box_w   = x2 - x1
+            dist_cm = (SHOULDER_WIDTH_CM * FOCAL_LEN_PX) / box_w if box_w > 10 else TARGET_DIST_CM
+
+        ema_dist = (EMA_ALPHA * dist_cm + (1 - EMA_ALPHA) * ema_dist
+                    if ema_dist is not None else dist_cm)
+
+        smooth_cx    = int(ema_cx)
+        smooth_dist  = ema_dist
+        horiz_offset = smooth_cx - frame_cx
+        dist_error   = smooth_dist - TARGET_DIST_CM
+
+        # Tracking overlay
+        cv2.line(annotated, (frame_cx, 0), (frame_cx, h), (60, 60, 60), 1)
+        cv2.line(annotated, (frame_cx, h // 2), (smooth_cx, h // 2), (0, 255, 80), 2)
+        cv2.circle(annotated, (smooth_cx, (y1 + y2) // 2), 6, (0, 255, 80), -1)
+
+        # Distance bar
+        bar_max_h = h - 80
+        bar_fill  = int(min(smooth_dist / (TARGET_DIST_CM * 2), 1.0) * bar_max_h)
+        bar_color = (0, 255, 80) if abs(dist_error) < DIST_DEADZONE_CM else (0, 120, 255)
+        cv2.rectangle(annotated, (w - 25, 40), (w - 10, 40 + bar_max_h), (40, 40, 40), -1)
+        cv2.rectangle(annotated,
+                      (w - 25, 40 + bar_max_h - bar_fill),
+                      (w - 10, 40 + bar_max_h), bar_color, -1)
+        cv2.putText(annotated, f"{smooth_dist:.0f}cm",
+                    (w - 55, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.45, bar_color, 1)
+
+        # PID yaw + distance control
         if abs(horiz_offset) > TURN_DEADZONE:
-            if horiz_offset > 0:
-                turn_right()
-                next_left, next_right = TURN_SPEED, -TURN_SPEED
-                action_label = f"TURNING RIGHT ({horiz_offset:+d}px)"
-                label_color  = (0, 200, 255)
-            else:
-                turn_left()
-                next_left, next_right = -TURN_SPEED, TURN_SPEED
-                action_label = f"TURNING LEFT ({horiz_offset:+d}px)"
-                label_color  = (255, 200, 0)
-        elif abs(dist_error) > DIST_DEADZONE:
+            next_left, next_right = turn_pid(horiz_offset, prev_error, dt)
+            prev_error = horiz_offset
+            direction  = "RIGHT" if horiz_offset > 0 else "LEFT"
+            action_label = f"TURNING {direction} ({horiz_offset:+d}px)"
+            label_color  = (0, 200, 255) if horiz_offset > 0 else (255, 200, 0)
+            send_speeds(next_left, next_right)
+        elif abs(dist_error) > DIST_DEADZONE_CM:
+            prev_error = 0.0
             if dist_error > 0:
                 move_forward()
                 next_left = next_right = FORWARD_SPEED
-                action_label = f"FORWARD (~{approx_cm}cm)"
+                action_label = f"FORWARD  {smooth_dist:.0f}cm (target {TARGET_DIST_CM:.0f})"
                 label_color  = (0, 255, 80)
             else:
                 move_backward()
                 next_left = next_right = -BACKWARD_SPEED
-                action_label = f"BACKWARD (~{approx_cm}cm)"
+                action_label = f"BACKWARD {smooth_dist:.0f}cm (target {TARGET_DIST_CM:.0f})"
                 label_color  = (0, 80, 255)
         else:
+            prev_error = 0.0
             stop()
-            action_label = f"HOLDING (~{approx_cm}cm)"
+            action_label = f"HOLDING  {smooth_dist:.0f}cm ✓"
             label_color  = (255, 255, 255)
 
-        cv2.rectangle(annotated, (0, 0), (w, 60), (20, 20, 20), -1)
-        cv2.putText(annotated, action_label, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, label_color, 2)
-        cv2.putText(annotated, f"L:{next_left:+d}  R:{next_right:+d} | ratio:{cur_ratio:.2f} | x_off:{horiz_offset:+d}px | ~{approx_cm}cm", (20, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
+        # HUD
+        cv2.rectangle(annotated, (0, 0), (w, 58), (15, 15, 15), -1)
+        cv2.putText(annotated, action_label,
+                    (16, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.9, label_color, 2)
+        cv2.putText(annotated,
+                    f"L:{next_left:+d}  R:{next_right:+d} | dist:{smooth_dist:.1f}cm "
+                    f"| x_off:{horiz_offset:+d}px | ema_cx:{smooth_cx}",
+                    (16, h - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (140, 140, 140), 1)
 
         changed = (abs(next_left - last_left) > 5 or abs(next_right - last_right) > 5)
-        if changed or frames_since_cmd > 8:
+        if changed or frames_since_cmd > 6:
             send_speeds(next_left, next_right)
             last_left, last_right = next_left, next_right
             frames_since_cmd = 0
@@ -369,18 +475,52 @@ def set_mode():
     data = request.json
     new_mode = data.get('mode')
     
-    if new_mode in ["chatbot", "follower"]:
+    if new_mode in ["chatbot", "follower", "manual"]:
         old_mode = active_mode
         active_mode = new_mode
         print(f"[MODE SWITCH] Changed from {old_mode} to {active_mode}")
         
         if old_mode == "follower" and active_mode != "follower":
-            # Force massive wheels stop since tracking loop is now sleeping
+            # Force stop wheels when leaving Follower/Manual mode
             print("[SAFETY] Force stopping wheels because exiting Follower mode...")
+            stop()
+        elif old_mode == "manual" and active_mode != "manual":
+            print("[SAFETY] Force stopping wheels because exiting Manual mode...")
             stop()
             
         return jsonify({'success': True, 'mode': active_mode})
     return jsonify({'error': 'Invalid mode'}), 400
+
+@app.route('/api/manual', methods=['POST'])
+def manual_control():
+    """D-pad manual control — maps action names to (left, right) motor speeds."""
+    if active_mode != "manual":
+        return jsonify({'success': False, 'status': 'skipped_wrong_mode'})
+
+    data   = request.json or {}
+    action = data.get('action', 'stop')
+    speed  = int(data.get('speed', 80))
+    speed  = max(0, min(speed, 150))  # clamp to safe range
+
+    half = speed // 2  # slower wheel for turns
+
+    ACTION_MAP = {
+        'forward':   ( speed,  speed),
+        'backward':  (-speed, -speed),
+        'left':      (-half,   speed),
+        'right':     ( speed, -half),
+        'fwd_left':  ( half,   speed),
+        'fwd_right': ( speed,  half),
+        'bwd_left':  (-speed, -half),
+        'bwd_right': (-half,  -speed),
+        'stop':      (0,       0),
+    }
+
+    left, right = ACTION_MAP.get(action, (0, 0))
+    send_speeds(left, right)
+    print(f"[MANUAL] action={action}  L={left:+d}  R={right:+d}")
+    return jsonify({'success': True, 'action': action, 'left': left, 'right': right})
+
 
 @app.route('/api/estop', methods=['POST'])
 def estop():

@@ -121,6 +121,9 @@
             <button class="mode-tab" id="tabFollower">
                 👀 Follower Mode
             </button>
+            <button class="mode-tab" id="tabManual">
+                🎮 Manual Mode
+            </button>
         </div>
 
         <!-- ── Dynamic Content Area ───────────────────────── -->
@@ -132,7 +135,41 @@
                     <img src="/video_feed" class="camera-feed" id="cameraFeed" alt="Robot Vision Feed Offline" onerror="this.style.display='none'">
                 </div>
                 <div style="padding: 20px;">
-                    <button id="estopBtn" style="background-color: #ff0033; color: white; border: 2px solid rgba(255,255,255,0.5); border-radius: 12px; padding: 20px; font-weight: 800; font-size: 20px; cursor: pointer; box-shadow: 0 8px 30px rgba(255,0,50,0.6); width: 100%; transition: transform 0.1s;">
+                    <button class="estop-btn-red" id="estopBtnFollower" style="background-color: #ff0033; color: white; border: 2px solid rgba(255,255,255,0.5); border-radius: 12px; padding: 20px; font-weight: 800; font-size: 20px; cursor: pointer; box-shadow: 0 8px 30px rgba(255,0,50,0.6); width: 100%; transition: transform 0.1s;">
+                        🛑 EMERGENCY STOP 🛑
+                    </button>
+                </div>
+            </div>
+
+            <!-- Manual Mode View -->
+            <div id="manualSection" style="display: none; flex-direction: column; height: 100%; overflow-y: auto;">
+                <div class="camera-wrapper" style="height: 100%; max-height: 40vh;">
+                    <img src="/video_feed" class="camera-feed" id="cameraFeedManual" alt="Robot Vision Feed Offline" onerror="this.style.display='none'">
+                </div>
+                <div style="padding: 20px; display: flex; flex-direction: column; align-items: center; gap: 20px; flex: 1;">
+                    <div style="width: 100%; max-width: 300px; display: flex; flex-direction: column; gap: 10px;">
+                        <label for="manualSpeed" style="color: rgba(255,255,255,0.8); font-size: 14px; display: flex; justify-content: space-between;">
+                            <span>Speed</span>
+                            <span id="speedValue">80</span>
+                        </label>
+                        <input type="range" id="manualSpeed" min="40" max="150" value="80" style="width: 100%; cursor: pointer;">
+                    </div>
+                    
+                    <div class="d-pad" style="display: grid; grid-template-columns: repeat(3, 70px); grid-template-rows: repeat(3, 70px); gap: 10px; margin: 10px 0;">
+                        <button class="d-pad-btn" data-action="fwd_left" style="border-radius: 10px 0 0 0; background: rgba(0, 242, 254, 0.1); border: 1px solid rgba(0, 242, 254, 0.3); color: white; font-size: 20px; cursor: pointer;">↖</button>
+                        <button class="d-pad-btn" data-action="forward" style="border-radius: 10px 10px 0 0; background: rgba(0, 242, 254, 0.2); border: 1px solid rgba(0, 242, 254, 0.5); color: white; font-size: 24px; cursor: pointer;">▲</button>
+                        <button class="d-pad-btn" data-action="fwd_right" style="border-radius: 0 10px 0 0; background: rgba(0, 242, 254, 0.1); border: 1px solid rgba(0, 242, 254, 0.3); color: white; font-size: 20px; cursor: pointer;">↗</button>
+                        
+                        <button class="d-pad-btn" data-action="left" style="background: rgba(0, 242, 254, 0.2); border: 1px solid rgba(0, 242, 254, 0.5); color: white; font-size: 24px; cursor: pointer;">◀</button>
+                        <button class="d-pad-btn stop-action-btn" data-action="stop" style="border-radius: 50%; background: #ff0033; border: 2px solid rgba(255,255,255,0.3); color: white; font-weight: bold; font-size: 16px; cursor: pointer; box-shadow: 0 0 15px rgba(255,0,50,0.5);">STOP</button>
+                        <button class="d-pad-btn" data-action="right" style="background: rgba(0, 242, 254, 0.2); border: 1px solid rgba(0, 242, 254, 0.5); color: white; font-size: 24px; cursor: pointer;">▶</button>
+                        
+                        <button class="d-pad-btn" data-action="bwd_left" style="border-radius: 0 0 0 10px; background: rgba(0, 242, 254, 0.1); border: 1px solid rgba(0, 242, 254, 0.3); color: white; font-size: 20px; cursor: pointer;">↙</button>
+                        <button class="d-pad-btn" data-action="backward" style="border-radius: 0 0 10px 10px; background: rgba(0, 242, 254, 0.2); border: 1px solid rgba(0, 242, 254, 0.5); color: white; font-size: 24px; cursor: pointer;">▼</button>
+                        <button class="d-pad-btn" data-action="bwd_right" style="border-radius: 0 0 10px 0; background: rgba(0, 242, 254, 0.1); border: 1px solid rgba(0, 242, 254, 0.3); color: white; font-size: 20px; cursor: pointer;">↘</button>
+                    </div>
+
+                    <button class="estop-btn-red" id="estopBtnManual" style="background-color: #ff0033; color: white; border: 2px solid rgba(255,255,255,0.5); border-radius: 12px; padding: 20px; font-weight: 800; font-size: 20px; cursor: pointer; box-shadow: 0 8px 30px rgba(255,0,50,0.6); width: 100%; max-width: 300px; transition: transform 0.1s;">
                         🛑 EMERGENCY STOP 🛑
                     </button>
                 </div>
@@ -247,22 +284,33 @@
         // Tab Mode Switcher
         const tabChatbot = document.getElementById('tabChatbot');
         const tabFollower = document.getElementById('tabFollower');
+        const tabManual = document.getElementById('tabManual');
         const chatbotSection = document.getElementById('chatbotSection');
         const followerSection = document.getElementById('followerSection');
+        const manualSection = document.getElementById('manualSection');
         const inputArea = document.getElementById('inputArea');
 
         function switchMode(mode) {
+            // First hide everything and remove active classes
+            tabChatbot.classList.remove('active');
+            tabFollower.classList.remove('active');
+            if(tabManual) tabManual.classList.remove('active');
+            
+            chatbotSection.style.display = 'none';
+            followerSection.style.display = 'none';
+            if(manualSection) manualSection.style.display = 'none';
+
             if (mode === 'chatbot') {
                 tabChatbot.classList.add('active');
-                tabFollower.classList.remove('active');
                 chatbotSection.style.display = 'flex';
-                followerSection.style.display = 'none';
                 if(inputArea) inputArea.style.display = 'block';
-            } else {
+            } else if (mode === 'follower') {
                 tabFollower.classList.add('active');
-                tabChatbot.classList.remove('active');
-                chatbotSection.style.display = 'none';
                 followerSection.style.display = 'flex';
+                if(inputArea) inputArea.style.display = 'none';
+            } else if (mode === 'manual' && manualSection) {
+                tabManual.classList.add('active');
+                manualSection.style.display = 'flex';
                 if(inputArea) inputArea.style.display = 'none';
             }
             
@@ -276,17 +324,17 @@
 
         tabChatbot.addEventListener('click', () => switchMode('chatbot'));
         tabFollower.addEventListener('click', () => switchMode('follower'));
+        if(tabManual) tabManual.addEventListener('click', () => switchMode('manual'));
 
         // Background Init (ensure default matches Backend)
         switchMode('chatbot');
 
         // Emergency Stop Handler
-        const estopBtn = document.getElementById('estopBtn');
-        if (estopBtn) {
-            estopBtn.addEventListener('mousedown', () => estopBtn.style.transform = 'scale(0.95)');
-            estopBtn.addEventListener('mouseup', () => estopBtn.style.transform = 'scale(1)');
-            estopBtn.addEventListener('mouseleave', () => estopBtn.style.transform = 'scale(1)');
-            estopBtn.addEventListener('click', async () => {
+        document.querySelectorAll('.estop-btn-red').forEach(btn => {
+            btn.addEventListener('mousedown', () => btn.style.transform = 'scale(0.95)');
+            btn.addEventListener('mouseup', () => btn.style.transform = 'scale(1)');
+            btn.addEventListener('mouseleave', () => btn.style.transform = 'scale(1)');
+            btn.addEventListener('click', async () => {
                 try {
                     await fetch('/api/estop', { method: 'POST' });
                     // Visual feedback
@@ -304,7 +352,128 @@
                     console.error("ESTOP failed", e);
                 }
             });
+        });
+
+        // Manual controls logic
+        const dPadBtns = document.querySelectorAll('.d-pad-btn');
+        const manualSpeed = document.getElementById('manualSpeed');
+        const speedValue = document.getElementById('speedValue');
+
+        if(manualSpeed && speedValue) {
+            manualSpeed.addEventListener('input', (e) => {
+                speedValue.textContent = e.target.value;
+            });
         }
+
+        let sendControlCommand = async (action) => {
+            const speed = manualSpeed ? parseInt(manualSpeed.value) : 80;
+            try {
+                await fetch('/api/manual', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action, speed })
+                });
+            } catch (e) {
+                console.error("Manual control failed", e);
+            }
+        };
+
+        // Pointer events for mobile support (touch start/end)
+        dPadBtns.forEach(btn => {
+            let active = false;
+            
+            const activate = (e) => {
+                e.preventDefault();
+                if(active) return;
+                active = true;
+                btn.style.opacity = '0.7';
+                sendControlCommand(btn.dataset.action);
+            };
+            
+            const deactivate = (e) => {
+                e.preventDefault();
+                if(!active) return;
+                active = false;
+                btn.style.opacity = '1';
+                if(btn.dataset.action !== 'stop') {
+                    sendControlCommand('stop');
+                }
+            };
+
+            btn.addEventListener('mousedown', activate);
+            btn.addEventListener('touchstart', activate, {passive: false});
+            
+            btn.addEventListener('mouseup', deactivate);
+            btn.addEventListener('mouseleave', deactivate);
+            btn.addEventListener('touchend', deactivate, {passive: false});
+            btn.addEventListener('touchcancel', deactivate, {passive: false});
+        });
+
+        // Keyboard support for manual control
+        let keysPressed = {};
+        document.addEventListener('keydown', (e) => {
+            if(!tabManual || !tabManual.classList.contains('active')) return;
+            // Ignore if typing in text inputs (though input area is hidden in manual mode)
+            if (e.target.tagName.toLowerCase() === 'textarea' || e.target.tagName.toLowerCase() === 'input') return;
+            
+            if(keysPressed[e.key]) return; // prevent repeated triggers
+            keysPressed[e.key] = true;
+
+            let actionMap = {
+                'w': 'forward', 'ArrowUp': 'forward',
+                's': 'backward', 'ArrowDown': 'backward',
+                'a': 'left', 'ArrowLeft': 'left',
+                'd': 'right', 'ArrowRight': 'right',
+                ' ': 'stop'
+            };
+            
+            let action = actionMap[e.key];
+            
+            // Handles diagonals basic
+            if ((keysPressed['w'] || keysPressed['ArrowUp']) && (keysPressed['a'] || keysPressed['ArrowLeft'])) action = 'fwd_left';
+            if ((keysPressed['w'] || keysPressed['ArrowUp']) && (keysPressed['d'] || keysPressed['ArrowRight'])) action = 'fwd_right';
+            if ((keysPressed['s'] || keysPressed['ArrowDown']) && (keysPressed['a'] || keysPressed['ArrowLeft'])) action = 'bwd_left';
+            if ((keysPressed['s'] || keysPressed['ArrowDown']) && (keysPressed['d'] || keysPressed['ArrowRight'])) action = 'bwd_right';
+
+            if(action) {
+                e.preventDefault();
+                // Find corresponding button to visually highlight
+                document.querySelectorAll(`.d-pad-btn[data-action="${action}"]`).forEach(btn => btn.style.opacity = '0.7');
+                sendControlCommand(action);
+            }
+        });
+
+        document.addEventListener('keyup', (e) => {
+            if(!tabManual || !tabManual.classList.contains('active')) return;
+            
+            keysPressed[e.key] = false;
+            
+            // Evaluate if any keys are still pressed
+            let anyDirectionKey = ['w', 'a', 's', 'd', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].find(k => keysPressed[k]);
+            
+            // Revert all opacities
+            document.querySelectorAll(`.d-pad-btn`).forEach(btn => btn.style.opacity = '1');
+
+            if(!anyDirectionKey) {
+                sendControlCommand('stop');
+            } else {
+                // If some keys are still held, send the updated direction
+                let action = '';
+                if ((keysPressed['w'] || keysPressed['ArrowUp']) && (keysPressed['a'] || keysPressed['ArrowLeft'])) action = 'fwd_left';
+                else if ((keysPressed['w'] || keysPressed['ArrowUp']) && (keysPressed['d'] || keysPressed['ArrowRight'])) action = 'fwd_right';
+                else if ((keysPressed['s'] || keysPressed['ArrowDown']) && (keysPressed['a'] || keysPressed['ArrowLeft'])) action = 'bwd_left';
+                else if ((keysPressed['s'] || keysPressed['ArrowDown']) && (keysPressed['d'] || keysPressed['ArrowRight'])) action = 'bwd_right';
+                else if (keysPressed['w'] || keysPressed['ArrowUp']) action = 'forward';
+                else if (keysPressed['s'] || keysPressed['ArrowDown']) action = 'backward';
+                else if (keysPressed['a'] || keysPressed['ArrowLeft']) action = 'left';
+                else if (keysPressed['d'] || keysPressed['ArrowRight']) action = 'right';
+                
+                if (action) {
+                    document.querySelectorAll(`.d-pad-btn[data-action="${action}"]`).forEach(btn => btn.style.opacity = '0.7');
+                    sendControlCommand(action);
+                }
+            }
+        });
     </script>
 </body>
 
